@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "lemvori-shift-db",
-      "database_id": "REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"
+      "database_id": "cb12167e-3d3a-429c-824f-6a55588fd1aa"
     }
   ],
   "triggers": { "crons": ["0 * * * *"] }
