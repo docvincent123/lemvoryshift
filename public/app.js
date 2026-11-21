@@ -63,7 +63,9 @@ function renderDay() {
   $('#day-content').innerHTML=shifts.length ? shifts.map(s=>`<article class="shift-card"><div class="shift-card-head"><div><h3>${esc(s.team)}</h3><div class="timing">${esc(s.start)} — ${esc(s.end)}${s.end<=s.start?' (до наступного дня)':''}</div></div><div class="card-actions"><button class="text-btn" data-edit-shift="${s.id}">Змінити</button><button class="text-btn danger" data-delete-shift="${s.id}">Видалити</button></div></div><div class="person-pills">${s.members.map(m=>`<span class="person-pill">${esc(m.name)}</span>`).join('')}</div>${s.note?`<p>📝 ${esc(s.note)}</p>`:''}</article>`).join('') : '<div class="empty-state">На цей день чергувань поки немає. Натисни «Додати чергування», щоб запланувати команду.</div>';
 }
 function renderEmployees() {
-  $('#employees-list').innerHTML=state.employees.length ? state.employees.map(e=>`<article class="employee-row ${e.active?'':'muted'}"><div class="employee-main"><div class="avatar">${esc(e.name.trim()[0]?.toUpperCase()||'?')}</div><div><strong>${esc(e.name)}</strong><small>${e.active?'Активний':'Неактивний'} · ${e.linked?'✅ Telegram підключено':'○ Telegram ще не підключено'} · ${e.reminders?'🔔 Нагадування увімкнено':'🔕 Вимкнено'}</small></div></div><div class="employee-actions"><button class="btn secondary small-btn" data-edit-emp="${e.id}">Редагувати</button>${e.active?`<button class="btn secondary small-btn" data-code-emp="${e.id}">Код Telegram</button>`:''}${e.linked?`<button class="btn secondary small-btn" data-test-emp="${e.id}">Тест</button><button class="text-btn danger" data-disconnect-emp="${e.id}">Відв'язати</button>`:''}</div></article>`).join('') : '<div class="empty-state">Ще немає працівників. Додай хоча б одного, перш ніж створювати зміну.</div>';
+  const query=($('#employee-search').value||'').toLowerCase().replace(/[\s().-]/g,'');
+  const filtered=state.employees.filter(e=>!query || `${e.name} ${e.phone||''}`.toLowerCase().replace(/[\s().-]/g,'').includes(query));
+  $('#employees-list').innerHTML=filtered.length ? filtered.map(e=>`<article class="employee-row ${e.active?'':'muted'}"><div class="employee-main"><div class="avatar">${esc(e.name.trim()[0]?.toUpperCase()||'?')}</div><div><strong>${esc(e.name)}</strong><small>${e.phone?'📱 '+esc(e.phone)+' · ':'Телефон не вказано · '}${e.active?'Активний':'Неактивний'} · ${e.linked?'✅ Telegram підключено':'○ Telegram ще не підключено'} · ${e.reminders?'🔔 Нагадування увімкнено':'🔕 Вимкнено'}</small></div></div><div class="employee-actions"><button class="btn secondary small-btn" data-edit-emp="${e.id}">Редагувати</button>${e.active?`<button class="btn secondary small-btn" data-code-emp="${e.id}">Код Telegram</button>`:''}${e.linked?`<button class="btn secondary small-btn" data-test-emp="${e.id}">Тест</button><button class="text-btn danger" data-disconnect-emp="${e.id}">Відв'язати</button>`:''}</div></article>`).join('') : '<div class="empty-state">Ще немає працівників. Додай хоча б одного, перш ніж створювати зміну.</div>';
 }
 function tab(name) {
   document.querySelectorAll('[data-tab]').forEach(el=>el.classList.toggle('active',el.dataset.tab===name));
@@ -80,7 +82,6 @@ function shiftModal(id=null) {
   $('#shift-date').value=shift?.date||state.selectedDay;
   $('#shift-team').value=shift?.team||'Зміна №1';
   $('#shift-start').value=shift?.start||'08:00';
-  $('#shift-end').value=shift?.end||'08:00';
   $('#shift-note').value=shift?.note||'';
   const assigned=new Set(shift?.members.map(p=>p.id)||[]);
   const active=state.employees.filter(e=>e.active || assigned.has(e.id));
@@ -93,6 +94,7 @@ function employeeModal(id=null) {
   $('#employee-id').value=e?.id??'';
   $('#employee-dialog-title').textContent=e?'Редагувати працівника':'Новий працівник';
   $('#employee-name').value=e?.name||'';
+  $('#employee-phone').value=e?.phone||'';
   $('#employee-active').checked=e?.active??true;
   $('#employee-reminders').checked=e?.reminders??true;
   $('#employee-flags').hidden=!e;
@@ -129,18 +131,19 @@ function attachEvents() {
   $('#add-shift').addEventListener('click',()=>shiftModal());
   $('#add-day-shift').addEventListener('click',()=>shiftModal());
   $('#add-worker').addEventListener('click',()=>employeeModal());
+  $('#employee-search').addEventListener('input',renderEmployees);
   $('#print').addEventListener('click',()=>window.print());
   document.querySelectorAll('.close-modal').forEach(b=>b.addEventListener('click',()=>b.closest('dialog').close()));
   $('#shift-form').addEventListener('submit',e=>{e.preventDefault();action(async()=>{
     const id=Number($('#shift-id').value)||null;
-    const payload={date:$('#shift-date').value,team:$('#shift-team').value,start:$('#shift-start').value,end:$('#shift-end').value,note:$('#shift-note').value,members:[...$('#shift-members').querySelectorAll('input:checked:not(:disabled)')].map(i=>Number(i.value))};
+    const payload={date:$('#shift-date').value,team:$('#shift-team').value,start:$('#shift-start').value,end:$('#shift-start').value,note:$('#shift-note').value,members:[...$('#shift-members').querySelectorAll('input:checked:not(:disabled)')].map(i=>Number(i.value))};
     await api(id?`/api/shifts/${id}`:'/api/shifts',{method:id?'PUT':'POST',body:payload});
     $('#shift-dialog').close();toast('✅ Зміну збережено');
     if(payload.date.slice(0,7)!==state.month)setMonth(payload.date.slice(0,7));else{state.selectedDay=payload.date;await load();}
   });});
   $('#employee-form').addEventListener('submit',e=>{e.preventDefault();action(async()=>{
     const id=Number($('#employee-id').value)||null;
-    const payload={name:$('#employee-name').value,active:$('#employee-active').checked,reminders:$('#employee-reminders').checked};
+    const payload={name:$('#employee-name').value,phone:$('#employee-phone').value,active:$('#employee-active').checked,reminders:$('#employee-reminders').checked};
     await api(id?`/api/employees/${id}`:'/api/employees',{method:id?'PUT':'POST',body:payload});
     $('#employee-dialog').close();toast('✅ Працівника збережено');await load();
   });});
