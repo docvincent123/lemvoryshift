@@ -10,6 +10,17 @@ const textVal = (v, max) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 const validTime = v => typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v);
 const enc = new TextEncoder();
 const unsigned8 = value => new Uint8Array(value);
+
+// Existing D1 installations are upgraded once per Worker isolate, no manual schema reset.
+let phoneSchemaReady = false;
+async function ensurePhoneSchema(env) {
+  if (phoneSchemaReady || !env.DB) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS employee_phones (
+    employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,
+    phone_e164 TEXT NOT NULL UNIQUE
+  )`).run();
+  phoneSchemaReady = true;
+}
 const base64Url = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 const unbase64Url = input => unsigned8(Uint8Array.from(atob(input.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - input.length % 4) % 4)), c => c.charCodeAt(0)));
 async function sha256(input) { return base64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(input)))); }
@@ -345,6 +356,7 @@ export default {
     try {
       const url = new URL(request.url);
       const path = url.pathname;
+      if ((path.startsWith('/api/') || path === '/telegram/webhook') && env.DB) await ensurePhoneSchema(env);
       if (path === '/telegram/webhook') {
         if (request.method !== 'POST') return fail('Method Not Allowed',405);
         return await processWebhook(request,env);
