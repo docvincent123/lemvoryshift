@@ -1,4 +1,4 @@
-import { isValidISODate, validMonth, addDays, kyivParts, prettyDate, parseBotDate, splitTelegramText } from './utils.js';
+import { isValidISODate, validMonth, addDays, kyivParts, prettyDate, parseBotDate, splitTelegramText, normalizePhone } from './utils.js';
 
 const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), {
   status,
@@ -88,10 +88,10 @@ async function loadShifts(env, from, toExclusive) {
 }
 async function roster(env, month) {
   if (!validMonth(month)) return fail('Некоректний місяць');
-  const employees = (await env.DB.prepare('SELECT id,full_name,active,telegram_id,reminders_enabled FROM employees ORDER BY active DESC,full_name').all()).results;
+  const employees = (await env.DB.prepare('SELECT e.id,e.full_name,e.active,e.telegram_id,e.reminders_enabled,p.phone_e164 FROM employees e LEFT JOIN employee_phones p ON p.employee_id=e.id ORDER BY e.active DESC,e.full_name').all()).results;
   const shifts = await loadShifts(env, `${month}-01`, nextMonth(month));
   // Telegram chat IDs should never be exposed to the browser.
-  return json({ employees: employees.map(e => ({ id:e.id,name:e.full_name,active:!!e.active,linked:!!e.telegram_id,reminders:!!e.reminders_enabled })),
+  return json({ employees: employees.map(e => ({ id:e.id,name:e.full_name,phone:e.phone_e164||'',active:!!e.active,linked:!!e.telegram_id,reminders:!!e.reminders_enabled })),
     shifts: shifts.map(s => ({ ...s, members: s.members.map(({id,name,active}) => ({id,name,active})) })) });
 }
 async function validateMemberIds(env, ids) {
@@ -104,7 +104,9 @@ async function validateMemberIds(env, ids) {
 }
 async function saveShift(request, env, id = null) {
   const b = await getBody(request);
-  if (!isValidISODate(b.date) || !validTime(b.start) || !validTime(b.end)) return fail('Дата або час некоректні');
+  if (!isValidISODate(b.date) || !validTime(b.start)) return fail('Дата або час некоректні');
+  if (b.end != null && b.end !== b.start) return fail('Підтримуються лише добові чергування: час завершення має дорівнювати часу початку наступного дня');
+  const end = b.start; // 24-hour shifts only, crosses midnight to the following day
   const team = textVal(b.team, 60), note = textVal(b.note, 300);
   if (!team) return fail('Назва бригади обов’язкова');
   const memberIds = await validateMemberIds(env, b.members);
@@ -113,7 +115,7 @@ async function saveShift(request, env, id = null) {
     const present = await env.DB.prepare('SELECT id FROM shifts WHERE id=?').bind(id).first();
     if (!present) return fail('Зміну не знайдено', 404);
     const queries = [
-      env.DB.prepare('UPDATE shifts SET shift_date=?,starts_at=?,ends_at=?,team_name=?,comment=? WHERE id=?').bind(b.date,b.start,b.end,team,note,id),
+      env.DB.prepare('UPDATE shifts SET shift_date=?,starts_at=?,ends_at=?,team_name=?,comment=? WHERE id=?').bind(b.date,b.start,end,team,note,id),
       env.DB.prepare('DELETE FROM shift_members WHERE shift_id=?').bind(id),
       ...memberIds.map(emp => env.DB.prepare('INSERT INTO shift_members(shift_id,employee_id) VALUES(?,?)').bind(id,emp))
     ];
@@ -121,7 +123,7 @@ async function saveShift(request, env, id = null) {
     return json({ ok:true,id });
   }
   const result = await env.DB.prepare('INSERT INTO shifts(shift_date,starts_at,ends_at,team_name,comment) VALUES(?,?,?,?,?)')
-    .bind(b.date,b.start,b.end,team,note).run();
+    .bind(b.date,b.start,end,team,note).run();
   const newId = result.meta.last_row_id;
   await env.DB.batch(memberIds.map(emp => env.DB.prepare('INSERT INTO shift_members(shift_id,employee_id) VALUES(?,?)').bind(newId,emp)));
   return json({ ok:true,id:newId }, 201);
@@ -130,13 +132,28 @@ async function saveEmployee(request, env, id = null) {
   const b = await getBody(request);
   const name = textVal(b.name, 90);
   if (name.length < 2) return fail('Укажіть ПІБ працівника');
+  const rawPhone = typeof b.phone === 'string' ? b.phone.trim() : '';
+  const phone = rawPhone ? normalizePhone(rawPhone) : null;
+  if (rawPhone && !phone) return fail('Введіть український номер у форматі +380XXXXXXXXX');
+  if (phone) {
+    const duplicate = await env.DB.prepare('SELECT employee_id FROM employee_phones WHERE phone_e164=?').bind(phone).first();
+    if (duplicate && duplicate.employee_id !== id) return fail('Цей номер телефону вже закріплено за іншим працівником',409);
+  }
   if (id === null) {
     const res = await env.DB.prepare('INSERT INTO employees(full_name) VALUES(?)').bind(name).run();
+    if (phone) await env.DB.prepare('INSERT INTO employee_phones(employee_id,phone_e164) VALUES(?,?)').bind(res.meta.last_row_id,phone).run();
     return json({ok:true,id:res.meta.last_row_id}, 201);
   }
   const result = await env.DB.prepare('UPDATE employees SET full_name=?,active=?,reminders_enabled=? WHERE id=?')
     .bind(name, b.active ? 1 : 0, b.reminders ? 1 : 0, id).run();
-  return result.meta.changes ? json({ok:true}) : fail('Працівника не знайдено',404);
+  if (!result.meta.changes) return fail('Працівника не знайдено',404);
+  if (phone) {
+    await env.DB.prepare(`INSERT INTO employee_phones(employee_id,phone_e164) VALUES(?,?)
+      ON CONFLICT(employee_id) DO UPDATE SET phone_e164=excluded.phone_e164`).bind(id,phone).run();
+  } else {
+    await env.DB.prepare('DELETE FROM employee_phones WHERE employee_id=?').bind(id).run();
+  }
+  return json({ok:true});
 }
 async function createConnectCode(env, id) {
   const employee = await env.DB.prepare('SELECT active,full_name FROM employees WHERE id=?').bind(id).first();
@@ -164,13 +181,35 @@ async function say(env, chatId, message) {
 }
 const shiftLine = s => `🕗 ${s.start}–${s.end}${s.end <= s.start ? ' (+1 день)' : ''} · ${s.team}\n👥 ${s.members.map(x=>x.name).join(', ')}${s.note ? `\n📝 ${s.note}` : ''}`;
 async function handleBot(message, env) {
-  if (!message?.text || message.chat?.type !== 'private') return;
+  if (message?.chat?.type !== 'private') return;
   const chatId = String(message.chat.id);
+  // Telegram Contact: link only when the user explicitly shared THEIR own number.
+  // Never trust a phone number merely typed in chat or another person's contact card.
+  if (message.contact) {
+    if (!message.from?.id || String(message.contact.user_id) !== String(message.from.id)
+      || chatId !== String(message.from.id)) {
+      return say(env,chatId,'⚠️ Надішли саме власний номер через кнопку Telegram «Поділитися номером».');
+    }
+    const phone = normalizePhone(message.contact.phone_number);
+    if (!phone) return say(env,chatId,'⚠️ Потрібен український номер +380XXXXXXXXX. Якщо у тебе інший номер, попроси адміністратора видати код.');
+    const employee = await env.DB.prepare(`SELECT e.id,e.full_name,e.telegram_id,e.active
+      FROM employee_phones p JOIN employees e ON e.id=p.employee_id WHERE p.phone_e164=?`).bind(phone).first();
+    if (!employee || !employee.active) return say(env,chatId,'❌ Цей номер не внесено до графіка. Звернись до адміністратора.');
+    const current = await env.DB.prepare('SELECT id FROM employees WHERE telegram_id=?').bind(chatId).first();
+    if ((current && current.id !== employee.id) || (employee.telegram_id && employee.telegram_id !== chatId)) {
+      return say(env,chatId,'⚠️ Telegram уже прив’язаний до іншого профілю. Попроси адміністратора перевірити прив’язку.');
+    }
+    await env.DB.prepare('UPDATE employees SET telegram_id=?,connect_code_hash=NULL,connect_code_expires=NULL WHERE id=?').bind(chatId,employee.id).run();
+    return telegramCall(env,'sendMessage',{chat_id:chatId,
+      text:`✅ ${employee.full_name}, твій номер підтверджено через Telegram! Графік підключений.\n\nНапиши /my, щоб побачити свої чергування, або /my next — наступний місяць.`,
+      reply_markup:{remove_keyboard:true}});
+  }
+  if (!message?.text) return;
   const content = message.text.trim();
   const [rawCmd, ...args] = content.split(/\s+/);
   const cmd = rawCmd.toLowerCase().split('@')[0];
   const emp = await env.DB.prepare('SELECT id,full_name,active,reminders_enabled FROM employees WHERE telegram_id=?').bind(chatId).first();
-  const help = 'Команди:\n/my — мої зміни цього місяця\n/next — наступне чергування\n/month — загальний графік за місяць\n/team — хто чергує сьогодні\n/team 24.11 — хто чергує у вказаний день\n/tomorrow — хто чергує завтра\n/reminders on або off — персональні нагадування';
+  const help = 'Команди:\n/my — мої чергування цього місяця\n/my next — мої чергування наступного місяця\n/next — найближче чергування\n/month — загальний графік за місяць\n/month next — загальний графік наступного місяця\n/team 24.11 — хто чергує у вказаний день\n/tomorrow — хто чергує завтра\n/reminders on або off — нагадування';
   if (cmd === '/start' && args[0]) {
     const code = args[0].toUpperCase();
     if (!/^[A-HJ-NP-Z2-9]{12}$/.test(code)) return say(env,chatId,'❌ Неправильний код підключення.');
@@ -185,7 +224,11 @@ async function handleBot(message, env) {
       return say(env,chatId,`✅ Привіт, ${candidate.full_name}! Твій графік підключено.\n\n${help}`);
     } catch { return say(env,chatId,'⚠️ Підключення не вдалося. Звернись до адміністратора.'); }
   }
-  if (!emp || !emp.active) return say(env,chatId,'👋 Привіт! Щоб побачити графік, попроси адміністратора надати персональний код, а тоді введи /start КОД');
+  if (!emp || !emp.active) return telegramCall(env,'sendMessage',{
+    chat_id:chatId,
+    text:'👋 Привіт! Для прив’язки графіка натисни кнопку і поділися своїм номером. Номер має бути внесений адміністратором. Або введи /start КОД, якщо адміністратор видав код.',
+    reply_markup:{keyboard:[[{text:'📱 Поділитися моїм номером',request_contact:true}]],resize_keyboard:true,one_time_keyboard:true}
+  });
   if (['/start','/help','меню'].includes(cmd)) return say(env,chatId,`Привіт, ${emp.full_name}!\n\n${help}`);
   const now = kyivParts();
   const thisMonth = now.date.slice(0,7);
@@ -200,10 +243,10 @@ async function handleBot(message, env) {
     return say(env,chatId,next ? `📌 Наступне чергування: ${prettyDate(next.date)}\n${shiftLine(next)}` : 'Найближчих чергувань не знайдено.');
   }
   if (cmd === '/my' || cmd === '/month') {
-    const month = args[0] && validMonth(args[0]) ? args[0] : thisMonth;
+    const month = args[0]==='next' ? nextMonth(`${thisMonth}-01`).slice(0,7) : args[0] && validMonth(args[0]) ? args[0] : thisMonth;
     const results = await loadShifts(env,`${month}-01`,nextMonth(month));
     const subset = cmd === '/my' ? results.filter(s=>s.members.some(e=>e.id===emp.id)) : results;
-    return say(env,chatId,`${cmd==='/my' ? '📅 Мої чергування' : '📅 Загальний графік'} · ${month}\n\n${subset.length ? subset.map(s=>`${prettyDate(s.date)}\n${shiftLine(s)}`).join('\n\n') : 'Змін немає.'}\n\n${cmd === '/month' ? 'Інший місяць: /month 2026-12' : 'Інший місяць: /my 2026-12'}`);
+    return say(env,chatId,`${cmd==='/my' ? '📅 Мої чергування' : '📅 Загальний графік'} · ${month}\n\n${subset.length ? subset.map(s=>`${prettyDate(s.date)}\n${shiftLine(s)}`).join('\n\n') : 'Змін немає.'}\n\n${cmd === '/month' ? 'Наступний місяць: /month next' : 'Наступний місяць: /my next'}`);
   }
   if (['/team','/today','/tomorrow'].includes(cmd)) {
     const date = cmd === '/tomorrow' ? addDays(now.date,1) : parseBotDate(args[0],now.date);
