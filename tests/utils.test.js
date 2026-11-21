@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, isValidISODate, validMonth, kyivParts, parseBotDate, splitTelegramText } from '../src/utils.js';
+import { addDays, isValidISODate, validMonth, kyivParts, parseBotDate, splitTelegramText, normalizePhone } from '../src/utils.js';
 
 test('validates actual calendar dates and leap years', () => {
   assert.equal(isValidISODate('2028-02-29'),true);
@@ -27,4 +27,12 @@ test('telegram output chunks fit into API limits', () => {
   const parts=splitTelegramText(s);
   assert.ok(parts.length > 2);
   assert.ok(parts.every(t=>t.length<=3600));
+});
+
+test('normalizes Ukrainian phone numbers and rejects invalid numbers', () => {
+  assert.equal(normalizePhone('050 123 45 67'),'+380501234567');
+  assert.equal(normalizePhone('380501234567'),'+380501234567');
+  assert.equal(normalizePhone('+380 (50) 123-45-67'),'+380501234567');
+  assert.equal(normalizePhone('+12025550123'),null);
+  assert.equal(normalizePhone('not a phone'),null);
 });
