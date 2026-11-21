@@ -62,3 +62,13 @@ export function splitTelegramText(message, max = 3600) {
   if (current) chunks.push(current);
   return chunks;
 }
+
+// Normalize Ukrainian mobile numbers to E.164; never use a phone as proof of ownership by itself.
+export function normalizePhone(value) {
+  if (typeof value !== 'string') return null;
+  const digits = value.replace(/[\s().-]/g, '');
+  if (/^0\d{9}$/.test(digits)) return `+38${digits}`;
+  if (/^380\d{9}$/.test(digits)) return `+${digits}`;
+  if (/^\+380\d{9}$/.test(digits)) return digits;
+  return null;
+}
