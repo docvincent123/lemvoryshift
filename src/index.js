@@ -158,6 +158,11 @@ async function saveEmployee(request, env, id = null) {
   const result = await env.DB.prepare('UPDATE employees SET full_name=?,active=?,reminders_enabled=? WHERE id=?')
     .bind(name, b.active ? 1 : 0, b.reminders ? 1 : 0, id).run();
   if (!result.meta.changes) return fail('Працівника не знайдено',404);
+  const previousPhone = await env.DB.prepare('SELECT phone_e164 FROM employee_phones WHERE employee_id=?').bind(id).first();
+  // An employee whose registered number changes must re-confirm Telegram ownership.
+  if (previousPhone && previousPhone.phone_e164 !== phone) {
+    await env.DB.prepare('UPDATE employees SET telegram_id=NULL,connect_code_hash=NULL,connect_code_expires=NULL WHERE id=?').bind(id).run();
+  }
   if (phone) {
     await env.DB.prepare(`INSERT INTO employee_phones(employee_id,phone_e164) VALUES(?,?)
       ON CONFLICT(employee_id) DO UPDATE SET phone_e164=excluded.phone_e164`).bind(id,phone).run();
