@@ -11,6 +11,12 @@ CREATE TABLE IF NOT EXISTS employees (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Phone numbers are kept in the private D1 database, not in GitHub.
+CREATE TABLE IF NOT EXISTS employee_phones (
+  employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,
+  phone_e164 TEXT NOT NULL UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS shifts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shift_date TEXT NOT NULL,
